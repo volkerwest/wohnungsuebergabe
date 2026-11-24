@@ -34,6 +34,7 @@ const PDF_B = (() => {
         while (breite(wort, gr, fett) > maxB && Array.from(wort).length > 1) {
           const z = Array.from(wort); let i = z.length;
           while (i > 1 && breite(z.slice(0, i).join(''), gr, fett) > maxB) i--;
+          for (let j = i; j > i * 0.45; j--) if ('@.-_/'.includes(z[j - 1])) { i = j; break; }
           aus.push(z.slice(0, i).join('')); wort = z.slice(i).join('');
         }
         zeile = wort;
@@ -45,11 +46,12 @@ const PDF_B = (() => {
 
   class Dokument {
     constructor() { this.B = 595.28; this.H = 841.89; this.seiten = []; this.bilder = []; this.neueSeite(); }
-    neueSeite() { this.s = { ops: [], bilder: new Set() }; this.seiten.push(this.s); }
+    neueSeite() { this.s = { ops: [], cmds: [], bilder: new Set() }; this.seiten.push(this.s); }
     farbe(f) { return f.map(x => n2(x)).join(' '); }
     text(x, y, s, gr, opt) {
       const { fett = false, farbe = [0.1, 0.13, 0.16] } = opt || {};
       s = String(s); if (!s) return;
+      this.s.cmds.push(['t', x, y, s, gr, fett, farbe]);
       if (!geht(s)) { this.textBild(x, y, s, gr, fett, farbe); return; }
       this.s.ops.push('BT /' + (fett ? 'F2' : 'F1') + ` ${n2(gr)} Tf ${this.farbe(farbe)} rg ${n2(x)} ${n2(this.H - y)} Td <${hex(s)}> Tj ET`);
     }
@@ -63,19 +65,40 @@ const PDF_B = (() => {
       k.fillText(s, 0, gr * f);
       const roh = atob(c.toDataURL('image/jpeg', 0.92).split(',')[1]);
       const a = new Uint8Array(roh.length); for (let i = 0; i < roh.length; i++) a[i] = roh.charCodeAt(i);
-      this.bild(this.bildDazu(a, c.width, c.height), x, y - gr, b, h);
+      this.bild(this.bildDazu(a, c.width, c.height), x, y - gr, b, h, true);
     }
     linie(x1, y1, x2, y2, st = 0.5, farbe = [0.75, 0.78, 0.8]) {
+      this.s.cmds.push(['l', x1, y1, x2, y2, st, farbe]);
       this.s.ops.push(`${this.farbe(farbe)} RG ${n2(st)} w ${n2(x1)} ${n2(this.H - y1)} m ${n2(x2)} ${n2(this.H - y2)} l S`);
     }
     strich(x1, y1, x2, y2, st) {
+      this.s.cmds.push(['l', x1, y1, x2, y2, st, [0.05, 0.1, 0.35], true]);
       this.s.ops.push(`1 J 1 j 0.05 0.1 0.35 RG ${n2(st)} w ${n2(x1)} ${n2(this.H - y1)} m ${n2(x2)} ${n2(this.H - y2)} l S`);
     }
-    flaeche(x, y, b, h, farbe) { this.s.ops.push(`${this.farbe(farbe)} rg ${n2(x)} ${n2(this.H - y - h)} ${n2(b)} ${n2(h)} re f`); }
+    flaeche(x, y, b, h, farbe) { this.s.cmds.push(['f', x, y, b, h, farbe]); this.s.ops.push(`${this.farbe(farbe)} rg ${n2(x)} ${n2(this.H - y - h)} ${n2(b)} ${n2(h)} re f`); }
     bildDazu(bytes, w, h) { this.bilder.push({ bytes, w, h }); return this.bilder.length - 1; }
-    bild(i, x, y, b, h) {
+    bild(i, x, y, b, h, nurPdf) {
+      if (!nurPdf) this.s.cmds.push(['b', i, x, y, b, h]);
       this.s.bilder.add(i);
       this.s.ops.push(`q ${n2(b)} 0 0 ${n2(h)} ${n2(x)} ${n2(this.H - y - h)} cm /I${i} Do Q`);
+    }
+    /* Zeichnet eine Seite genau so, wie sie im PDF steht (für die Ansicht in der App). */
+    async seiteAlsBild(nr, breitePx) {
+      const f = breitePx / this.B, c = document.createElement('canvas'); c.width = breitePx; c.height = Math.round(this.H * f);
+      const k = c.getContext('2d'), rgb = a => `rgb(${a.map(v => Math.round(v * 255)).join(',')})`;
+      k.fillStyle = '#fff'; k.fillRect(0, 0, c.width, c.height); k.scale(f, f); k.textBaseline = 'alphabetic';
+      for (const z of this.seiten[nr].cmds) {
+        if (z[0] === 't') { k.fillStyle = rgb(z[6]); k.font = (z[5] ? 'bold ' : '') + z[4] + 'px Helvetica, Arial, sans-serif'; k.fillText(z[3], z[1], z[2]); }
+        else if (z[0] === 'l') { k.strokeStyle = rgb(z[6]); k.lineWidth = z[5]; k.lineCap = z[7] ? 'round' : 'butt'; k.beginPath(); k.moveTo(z[1], z[2]); k.lineTo(z[3], z[4]); k.stroke(); }
+        else if (z[0] === 'f') { k.fillStyle = rgb(z[5]); k.fillRect(z[1], z[2], z[3], z[4]); }
+        else {
+          const u = URL.createObjectURL(new Blob([this.bilder[z[1]].bytes], { type: 'image/jpeg' })), im = new Image();
+          await new Promise(r => { im.onload = im.onerror = r; im.src = u; });
+          if (im.naturalWidth) k.drawImage(im, z[2], z[3], z[4], z[5]);
+          URL.revokeObjectURL(u);
+        }
+      }
+      const bl = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.85)); c.width = c.height = 0; return bl;
     }
     fertig(titel) {
       const enc = new TextEncoder(), teile = [], pos = []; let laenge = 0;

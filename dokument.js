@@ -24,7 +24,7 @@ async function bauDokument(p) {
   ]) });
 
   b.push({ t: 'h', text: 'Beteiligte' });
-  b.push({ t: 'table', cols: [['Rolle', 0.22], ['Name', 0.26], ['Anschrift', 0.26], ['Kontakt', 0.26]],
+  b.push({ t: 'table', cols: [['Rolle', 0.19], ['Name', 0.23], ['Anschrift', 0.27], ['Kontakt', 0.31]],
     rows: p.personen.filter(x => x.name || x.email).map(x => [x.rolle, x.name, x.anschrift, [x.email, x.tel].filter(Boolean).join('\n')]) });
 
   if (p.zaehler.length) {
@@ -53,6 +53,11 @@ async function bauDokument(p) {
   }
   if (!nrM) b.push({ t: 'p', text: 'Es wurden keine Mängel eingetragen.' });
 
+  if (p.ergaenzungen || (p.fotosNeu && p.fotosNeu.length)) {
+    b.push({ t: 'h', text: 'Ergänzungen bei der Übergabe' });
+    if (p.ergaenzungen) b.push({ t: 'p', text: p.ergaenzungen });
+    const ef = await merke(p.fotosNeu, 'Ergänzung bei der Übergabe'); if (ef) b.push({ t: 'p', text: ef });
+  }
   const sl = p.schluessel.filter(s => s.anzahl || s.nummer || s.bemerkung);
   const sf = await merke(p.schluesselFotos, 'Schlüssel');
   if (sl.length || sf) {
@@ -82,25 +87,26 @@ function zeichneStriche(k, striche, b, h) {
   }
 }
 
-async function bauPdf(p, meldung) {
+const bauPdf = async (p, meldung) => { const d = await bauPdfDok(p, meldung); return d.fertig(d.titel); };
+async function bauPdfDok(p, meldung) {
   const bloecke = await bauDokument(p), abdruck = await fingerabdruck(p);
   const d = new PDF_B.Dokument(), L = 50, R = d.B - 50, BR = R - L, UNTEN = d.H - 62;
   const grau = [0.38, 0.44, 0.48], petrol = [0.05, 0.37, 0.4];
   let y = 60;
   const platz = h => { if (y + h > UNTEN) { d.neueSeite(); y = 56; } };
   const absatz = (text, gr, opt) => { for (const z of PDF_B.umbruch(text, BR, gr, opt && opt.fett)) { platz(gr * 1.45); d.text(L, y + gr, z, gr, opt); y += gr * 1.45; } };
-  const zeile = (zellen, breiten, gr, kopf) => {
+  const zeile = (zellen, breiten, gr, kopf, kopfzeile) => {
     const zl = zellen.map((t, i) => PDF_B.umbruch(t, breiten[i] - 8, gr, kopf));
     const lh = gr * 1.4; let rest = zl;
     /* Sehr lange Zellen laufen auf der nächsten Seite weiter. */
     while (rest.some(z => z.length)) {
       const n = Math.max(...rest.map(z => z.length));
-      if (n * lh + 8 > UNTEN - y && (n <= 12 || UNTEN - y < 5 * lh)) { d.neueSeite(); y = 56; }
-      const passt = Math.max(1, Math.min(n, Math.floor((UNTEN - y - 8) / lh)));
-      const h = passt * lh + 8;
+      if (n * lh + 10 > UNTEN - y && (n <= 12 || UNTEN - y < 5 * lh)) { d.neueSeite(); y = 56; if (kopfzeile) kopfzeile(); }
+      const passt = Math.max(1, Math.min(n, Math.floor((UNTEN - y - 10) / lh)));
+      const h = passt * lh + 10;
       if (kopf) d.flaeche(L, y, BR, h, [0.92, 0.95, 0.95]);
       let x = L;
-      rest.forEach((z, i) => { z.slice(0, passt).forEach((t, j) => d.text(x + 4, y + 4 + gr + j * lh - 0.5, t, gr, { fett: !!kopf, farbe: kopf ? grau : undefined })); x += breiten[i]; });
+      rest.forEach((z, i) => { z.slice(0, passt).forEach((t, j) => d.text(x + 4, y + 5 + gr + j * lh - 0.5, t, gr, { fett: !!kopf, farbe: kopf ? grau : undefined })); x += breiten[i]; });
       y += h; d.linie(L, y, R, y, 0.4);
       rest = rest.map(z => z.slice(passt));
     }
@@ -113,26 +119,27 @@ async function bauPdf(p, meldung) {
       absatz(b.text, 22, { fett: true }); absatz(b.sub, 11, { farbe: grau }); y += 10;
     } else if (b.t === 'h') {
       if (b.seite) { d.neueSeite(); y = 56; } else { y += 14; platz(b.text === 'Unterschriften' ? 160 : 70); }
-      absatz(b.text, 13, { fett: true, farbe: petrol }); y += 3;
+      absatz(b.text, 14, { fett: true, farbe: petrol }); y += 3;
     } else if (b.t === 'h2') {
-      y += 8; platz(54); absatz(b.text, 10.5, { fett: true }); y += 1;
+      y += 8; platz(54); absatz(b.text, 11.5, { fett: true }); y += 1;
     } else if (b.t === 'kv') {
       for (const [k, v] of b.rows) {
-        const zl = PDF_B.umbruch(v, BR - 140, 9.5); const kl = PDF_B.umbruch(k, 130, 9.5);
+        const zl = PDF_B.umbruch(v, BR - 140, 10.5); const kl = PDF_B.umbruch(k, 130, 10.5);
         for (let i = 0; i < Math.max(zl.length, kl.length); i++) {
-          platz(14);
-          if (kl[i]) d.text(L, y + 9.5, kl[i], 9.5, { farbe: grau });
-          if (zl[i]) d.text(L + 140, y + 9.5, zl[i], 9.5);
-          y += 13.5;
+          platz(16);
+          if (kl[i]) d.text(L, y + 10.5, kl[i], 10.5, { farbe: grau });
+          if (zl[i]) d.text(L + 140, y + 10.5, zl[i], 10.5);
+          y += 15;
         }
       }
       y += 3;
     } else if (b.t === 'table') {
       const br = b.cols.map(c => c[1] * BR);
-      platz(46); y += 2; zeile(b.cols.map(c => c[0]), br, 8, true);
-      for (const r of b.rows) zeile(r, br, 9);
+      const kopf = () => zeile(b.cols.map(c => c[0]), br, 9, true);
+      platz(62); y += 2; kopf();
+      for (const r of b.rows) zeile(r, br, 10, false, kopf);
       y += 4;
-    } else if (b.t === 'p') { absatz(b.text, 9.5); y += 2; }
+    } else if (b.t === 'p') { absatz(b.text, 10.5); y += 2; }
     else if (b.t === 'sign') {
       const sb = (BR - 24) / 2; let sp = 0, zeileY = 0;
       for (const it of b.items) {
@@ -149,9 +156,9 @@ async function bauPdf(p, meldung) {
           for (const z of PDF_B.umbruch(it.u.grund, sb, 8.5).slice(0, 4)) { yy += 11; d.text(x, yy, z, 8.5); }
         }
         d.linie(x, zeileY + 84, x + sb, zeileY + 84, 0.7, [0.3, 0.35, 0.38]);
-        d.text(x, zeileY + 96, PDF_B.umbruch(it.name, sb, 9.5, true)[0], 9.5, { fett: true });
-        d.text(x, zeileY + 108, it.rolle, 8.5, { farbe: grau });
-        d.text(x, zeileY + 119, it.u ? [it.u.ort, zeitDe(it.u.zeit)].filter(Boolean).join(', ') : 'noch nicht unterschrieben', 8.5, { farbe: grau });
+        d.text(x, zeileY + 96, PDF_B.umbruch(it.name, sb, 10.5, true)[0], 10.5, { fett: true });
+        d.text(x, zeileY + 108, it.rolle, 9.5, { farbe: grau });
+        d.text(x, zeileY + 119, it.u ? [it.u.ort, zeitDe(it.u.zeit)].filter(Boolean).join(', ') : 'noch nicht unterschrieben', 9.5, { farbe: grau });
         sp = 1 - sp; if (sp === 0) y = zeileY + 134;
       }
       if (sp === 1) y = zeileY + 134;
@@ -169,8 +176,8 @@ async function bauPdf(p, meldung) {
         paar.forEach(({ it, j, s }, q) => {
           const x = L + q * (fb + 16); let yy = y + hoch + 12;
           d.bild(d.bildDazu(new Uint8Array(j.daten), j.w, j.h), x, y, j.w * s, j.h * s);
-          for (const z of PDF_B.umbruch(`Foto ${it.nr}: ${it.wo}`, fb, 8.5, true).slice(0, 2)) { d.text(x, yy, z, 8.5, { fett: true }); yy += 11; }
-          for (const z of PDF_B.umbruch([it.text, zeitDe(it.zeit)].filter(Boolean).join(' · '), fb, 8).slice(0, 2)) { d.text(x, yy, z, 8, { farbe: grau }); yy += 11; }
+          for (const z of PDF_B.umbruch(`Foto ${it.nr}: ${it.wo}`, fb, 9.5, true).slice(0, 2)) { d.text(x, yy, z, 9.5, { fett: true }); yy += 12; }
+          for (const z of PDF_B.umbruch([it.text, zeitDe(it.zeit)].filter(Boolean).join(' · '), fb, 9).slice(0, 2)) { d.text(x, yy, z, 9, { farbe: grau }); yy += 12; }
         });
         y += hoch + 52;
       }
@@ -183,9 +190,10 @@ async function bauPdf(p, meldung) {
     const t = `Seite ${i + 1} von ${n}`; d.text(R - PDF_B.breite(t, 8), d.H - 34, t, 8, { farbe: grau });
     d.text(L, d.H - 23, 'Prüfsumme ' + abdruck, 6, { farbe: [0.6, 0.64, 0.67] });
   });
-  return d.fertig(`${p.art === 'auszug' ? 'Abnahmeprotokoll' : 'Übergabeprotokoll'} ${adresse(p)}`);
+  d.titel = `${p.art === 'auszug' ? 'Abnahmeprotokoll' : 'Übergabeprotokoll'} ${adresse(p)}`;
+  return d;
 }
 function dateiname(p, endung) {
-  const s = `${p.termin.datum || heute()}_${p.art === 'auszug' ? 'Abnahmeprotokoll' : 'Uebergabeprotokoll'}_${p.objekt.strasse || 'Wohnung'}`;
+  const s = `${p.termin.datum || heute()}_${p.art === 'auszug' ? 'Abnahmeprotokoll' : p.art === 'einzug' ? 'Uebergabeprotokoll' : 'Abnahme-und-Uebergabe'}_${p.objekt.strasse || 'Wohnung'}`;
   return s.replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/Ä/g, 'Ae').replace(/Ö/g, 'Oe').replace(/Ü/g, 'Ue').replace(/ß/g, 'ss').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+$/, '') + '.' + endung;
 }

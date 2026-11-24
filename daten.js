@@ -1,7 +1,7 @@
 'use strict';
 /* Datenmodell und Speicher. Alles bleibt in der Datenbank des Geräts. */
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
-const ARTEN = { auszug: 'Abnahmeprotokoll (Auszug)', einzug: 'Übergabeprotokoll (Einzug)' };
+const ARTEN = { auszug: 'Abnahmeprotokoll (Auszug)', einzug: 'Übergabeprotokoll (Einzug)', beides: 'Abnahme und Übergabe' };
 const ROLLEN = ['Vermieter', 'Vertretung Vermieter', 'Mieter (Auszug)', 'Mieter (Einzug)', 'Zeuge'];
 const ZAEHLER = { 'Strom': 'kWh', 'Gas': 'm³', 'Kaltwasser': 'm³', 'Warmwasser': 'm³', 'Wärmemenge': 'kWh', 'Heizkostenverteiler': 'Einheiten', 'Sonstiger Zähler': '' };
 const RAUMTYPEN = {
@@ -10,6 +10,8 @@ const RAUMTYPEN = {
   'Küche': ['Decke', 'Wände und Fliesen', 'Fußboden', 'Fenster', 'Tür', 'Heizkörper', 'Spüle und Armatur', 'Herd und Geräte', 'Schränke', 'Steckdosen und Schalter'],
   'Bad': ['Decke', 'Wände und Fliesen', 'Fußboden', 'Fenster oder Lüfter', 'Tür', 'Heizkörper', 'WC', 'Waschbecken und Armatur', 'Dusche oder Wanne', 'Fugen und Silikon'],
   'Balkon': ['Boden', 'Geländer', 'Balkontür'],
+  'Abstellraum': ['Decke', 'Wände', 'Fußboden', 'Tür', 'Steckdosen und Schalter'],
+  'Allgemein': ['Haupthähne Wasser', 'Sicherungskasten', 'Rauchmelder', 'Klingel', 'Briefkasten'],
   'Keller': ['Geräumt und sauber', 'Tür und Schloss'],
   'Stellplatz': ['Geräumt und sauber', 'Zustand']
 };
@@ -21,27 +23,50 @@ const SCHLUSS = {
   auszug: 'Dieses Protokoll hält den Zustand fest, der bei der gemeinsamen Begehung festgestellt wurde. Mängel, die dabei nicht erkennbar waren, sind damit nicht erfasst. Die Rückgabe der Schlüssel allein beendet das Mietverhältnis nicht. Die Fotos im Anhang gehören zum Protokoll.',
   einzug: 'Dieses Protokoll hält den Zustand fest, der bei der gemeinsamen Begehung festgestellt wurde. Mängel, die dabei nicht erkennbar waren, sind damit nicht erfasst und sollen nach Entdeckung unverzüglich gemeldet werden. Die Fotos im Anhang gehören zum Protokoll.'
 };
+/* Schritte im Verlauf. auto: hakt sich selbst ab, sobald der Abschnitt vollständig ist. */
+const VERLAUF = {
+  vorher: [['Termin mit allen Beteiligten bestätigen', ''], ['Mietvertrag, altes Übergabeprotokoll und Schlüsselliste bereitlegen', ''], ['iPad und Stift laden, App einmal ohne Netz starten', ''], ['Namen und E-Mail-Adressen eintragen', 'personen', 'personen']],
+  ort: [['Räume begehen, Mängel mit Foto festhalten', 'raeume', 'raeume'], ['Zähler ablesen und fotografieren', 'zaehler', 'zaehler'], ['Feststellungen durchgehen', 'sonstiges', 'sonstiges']],
+  auszug: [['Schlüssel zurücknehmen und zählen', 'schluessel', 'schluesselAlt'], ['Abnahme gemeinsam durchlesen und unterschreiben', 'unterschrift', 'sig:auszug']],
+  einzug: [['Schlüssel übergeben und zählen', 'schluessel', 'schluesselNeu'], ['Übergabe gemeinsam durchlesen und unterschreiben', 'unterschrift', 'sig:einzug']],
+  nachher: [['PDF an alle Beteiligten schicken', 'versand', 'versand'], ['Sicherungsdatei ablegen', 'versand'], ['Zählerstände an Versorger und Hausverwaltung melden', '']]
+};
+function neuerVerlauf(art) {
+  const st = (g, l) => l.map(x => ({ id: uid(), gruppe: g, text: x[0], ziel: x[1] || '', auto: x[2] || '', erledigt: '' }));
+  const kaution = art === 'auszug' ? ['Kaution abrechnen'] : art === 'einzug' ? ['Kautionseingang prüfen'] : ['Kaution mit bisherigem Mieter abrechnen', 'Kautionseingang vom neuen Mieter prüfen'];
+  return [...st('Vorher', VERLAUF.vorher),
+    ...st('Begehung', VERLAUF.ort),
+    ...(art !== 'einzug' ? st('Abnahme', VERLAUF.auszug) : []),
+    ...(art !== 'auszug' ? st('Übergabe', [...(art === 'beides' ? [['Angaben und Ergänzungen des neuen Mieters eintragen', 'uebergabe']] : []), ...VERLAUF.einzug]) : []),
+    ...st('Danach', [...VERLAUF.nachher, ...kaution.map(k => [k]), ...(art !== 'auszug' ? [['Wohnungsgeberbestätigung an neuen Mieter geben']] : [])])];
+}
+/* Welche Schriftstücke gehören zum Protokoll? Beim gemeinsamen Termin sind es zwei. */
+const dokumente = p => (p.art === 'beides' ? ['auszug', 'einzug'] : [p.art]);
+const personGehoert = (p, x, dok) => p.art !== 'beides' || (dok === 'auszug' ? x.rolle !== 'Mieter (Einzug)' : x.rolle !== 'Mieter (Auszug)');
+const dokSigniert = (p, dok) => Object.keys(p.unterschriften).some(k => k.endsWith(':' + dok));
 const heute = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const neuerRaum = (name, typ) => ({ id: uid(), name, punkte: (RAUMTYPEN[typ] || []).map(n => ({ name: n, status: '' })), maengel: [], fotos: [], bemerkung: '' });
 const neuerZaehler = art => ({ id: uid(), art, nummer: '', ort: '', stand: '', einheit: ZAEHLER[art] || '', bemerkung: '', fotos: [] });
 const neuePerson = rolle => ({ id: uid(), rolle, name: '', email: '', tel: '', anschrift: '' });
-const neuerSchluessel = art => ({ id: uid(), art, anzahl: '', nummer: '', bemerkung: '' });
+const neuerSchluessel = art => ({ id: uid(), art, anzahl: '', anzahlNeu: '', nummer: '', bemerkung: '' });
 
 function neuesProtokoll(art) {
-  const jetzt = new Date().toISOString();
+  const jetzt = new Date().toISOString(), doks = dokumente({ art });
   return {
     id: uid(), art, erstellt: jetzt, geaendert: jetzt,
     objekt: { strasse: '', plz: '', ort: '', wohnung: '', lage: '' },
     termin: { datum: heute(), beginn: '', ende: '' },
     miete: { beginn: '', ende: '', kaution: '', neueAnschrift: '' },
-    personen: [neuePerson('Vermieter'), neuePerson(art === 'auszug' ? 'Mieter (Auszug)' : 'Mieter (Einzug)')],
+    mieteNeu: { beginn: '', kaution: '' },
+    personen: [neuePerson('Vermieter'), ...doks.map(d => neuePerson(d === 'auszug' ? 'Mieter (Auszug)' : 'Mieter (Einzug)'))],
     zaehler: ['Strom', 'Kaltwasser', 'Warmwasser'].map(neuerZaehler),
     raeume: [['Flur', 'Flur'], ['Wohnzimmer', 'Zimmer'], ['Schlafzimmer', 'Zimmer'], ['Küche', 'Küche'], ['Bad', 'Bad'], ['Balkon', 'Balkon'], ['Keller', 'Keller']].map(r => neuerRaum(r[0], r[1])),
     schluessel: ['Haustür', 'Wohnungstür', 'Briefkasten', 'Keller'].map(neuerSchluessel),
     schluesselFotos: [],
-    feststellungen: FESTSTELLUNGEN[art].map(t => ({ id: uid(), text: t, wert: '' })),
-    vereinbarungen: '', schlusstext: SCHLUSS[art],
-    unterschriften: {}, pdfZeit: ''
+    feststellungen: doks.flatMap(d => FESTSTELLUNGEN[d].map(t => ({ id: uid(), text: t, wert: '', fuer: d }))),
+    vereinbarungen: '', schlusstext: SCHLUSS[doks[0]],
+    vereinbarungenNeu: '', schlusstextNeu: SCHLUSS.einzug, ergaenzungen: '', fotosNeu: [],
+    verlauf: neuerVerlauf(art), unterschriften: {}, pdfZeiten: {}
   };
 }
 
@@ -53,10 +78,11 @@ function pruefeProtokoll(x) {
   const ids = v => (Array.isArray(v) ? v.map(String) : []);
   const felder = (o, ks) => Object.fromEntries(ks.map(k => [k, s(o && o[k])]));
   const p = neuesProtokoll(x.art);
-  p.id = s(x.id) || uid(); p.erstellt = s(x.erstellt) || p.erstellt; p.geaendert = s(x.geaendert) || p.geaendert; p.pdfZeit = s(x.pdfZeit);
+  p.id = s(x.id) || uid(); p.erstellt = s(x.erstellt) || p.erstellt; p.geaendert = s(x.geaendert) || p.geaendert;
   p.objekt = felder(x.objekt, ['strasse', 'plz', 'ort', 'wohnung', 'lage']);
   p.termin = felder(x.termin, ['datum', 'beginn', 'ende']);
   p.miete = felder(x.miete, ['beginn', 'ende', 'kaution', 'neueAnschrift']);
+  p.mieteNeu = felder(x.mieteNeu, ['beginn', 'kaution']);
   p.personen = liste(x.personen).map(o => ({ id: s(o.id) || uid(), ...felder(o, ['rolle', 'name', 'email', 'tel', 'anschrift']) }));
   p.zaehler = liste(x.zaehler).map(o => ({ id: s(o.id) || uid(), ...felder(o, ['art', 'nummer', 'ort', 'stand', 'einheit', 'bemerkung']), fotos: ids(o.fotos) }));
   p.raeume = liste(x.raeume).map(o => ({
@@ -64,22 +90,49 @@ function pruefeProtokoll(x) {
     punkte: liste(o.punkte).map(q => ({ name: s(q.name), status: ['ok', 'mangel', 'entfaellt'].includes(q.status) ? q.status : '' })),
     maengel: liste(o.maengel).map(m => ({ id: s(m.id) || uid(), ...felder(m, ['punkt', 'text', 'wer', 'frist', 'kosten']), fotos: ids(m.fotos) }))
   }));
-  p.schluessel = liste(x.schluessel).map(o => ({ id: s(o.id) || uid(), ...felder(o, ['art', 'anzahl', 'nummer', 'bemerkung']) }));
-  p.schluesselFotos = ids(x.schluesselFotos);
-  p.feststellungen = liste(x.feststellungen).map(o => ({ id: s(o.id) || uid(), text: s(o.text), wert: ['ja', 'nein'].includes(o.wert) ? o.wert : '' }));
+  p.schluessel = liste(x.schluessel).map(o => ({ id: s(o.id) || uid(), ...felder(o, ['art', 'anzahl', 'anzahlNeu', 'nummer', 'bemerkung']) }));
+  p.schluesselFotos = ids(x.schluesselFotos); p.fotosNeu = ids(x.fotosNeu);
+  p.feststellungen = liste(x.feststellungen).map(o => ({ id: s(o.id) || uid(), text: s(o.text), wert: ['ja', 'nein'].includes(o.wert) ? o.wert : '', fuer: ['auszug', 'einzug', 'beide'].includes(o.fuer) ? o.fuer : dokumente(p)[0] }));
   p.vereinbarungen = s(x.vereinbarungen); p.schlusstext = s(x.schlusstext);
+  p.vereinbarungenNeu = s(x.vereinbarungenNeu); p.ergaenzungen = s(x.ergaenzungen); if (x.schlusstextNeu != null) p.schlusstextNeu = s(x.schlusstextNeu);
+  if (Array.isArray(x.verlauf)) p.verlauf = liste(x.verlauf).map(o => ({ id: s(o.id) || uid(), ...felder(o, ['gruppe', 'text', 'ziel', 'auto', 'erledigt']) }));
+  for (const d of dokumente(p)) { const z = x.pdfZeiten ? s(x.pdfZeiten[d]) : s(x.pdfZeit); if (z) p.pdfZeiten[d] = z; }
   p.unterschriften = {};
   for (const [k, u] of Object.entries(x.unterschriften || {})) {
-    if (!u || !p.personen.some(q => q.id === k)) continue;
-    p.unterschriften[k] = {
+    const [pid, dok] = k.includes(':') ? k.split(':') : [k, p.art]; /* bis 1.0.0 ohne Schriftstück gespeichert */
+    if (!u || !p.personen.some(q => q.id === pid) || !dokumente(p).includes(dok)) continue;
+    p.unterschriften[pid + ':' + dok] = {
       zeit: s(u.zeit), ort: s(u.ort), verweigert: !!u.verweigert, grund: s(u.grund), verh: Number(u.verh) || 0.4,
       striche: (Array.isArray(u.striche) ? u.striche : []).map(z => (Array.isArray(z) ? z : []).filter(Array.isArray).map(q => [+q[0] || 0, +q[1] || 0, +q[2] || 0.5]))
     };
   }
   return p;
 }
-const alleFotoIds = p => [...p.zaehler.flatMap(z => z.fotos), ...p.raeume.flatMap(r => [...r.maengel.flatMap(m => m.fotos), ...r.fotos]), ...p.schluesselFotos];
+const alleFotoIds = p => [...p.zaehler.flatMap(z => z.fotos), ...p.raeume.flatMap(r => [...r.maengel.flatMap(m => m.fotos), ...r.fotos]), ...p.schluesselFotos, ...(p.fotosNeu || [])];
 const istUnterschrieben = p => Object.keys(p.unterschriften).length > 0;
+
+/* Im Übergabeprotokoll wäre „Mieter“ missverständlich: gemeint ist dort der bisherige. */
+const werBeiEinzug = w => ({ 'Mieter': 'bisheriger Mieter', 'Nachmieter übernimmt': 'neuer Mieter' }[w] || w);
+/* Ein Schriftstück aus dem Protokoll. Beim gemeinsamen Termin sieht jeder Mieter nur, was ihn betrifft. */
+function sicht(p, dok) {
+  const q = JSON.parse(JSON.stringify(p)), sig = {};
+  for (const [k, u] of Object.entries(q.unterschriften)) { const [pid, d] = k.split(':'); if (d === dok) sig[pid] = u; }
+  q.unterschriften = sig;
+  if (p.art === 'beides') {
+    q.art = dok;
+    q.personen = q.personen.filter(x => personGehoert(p, x, dok));
+    q.feststellungen = q.feststellungen.filter(f => f.fuer === dok || f.fuer === 'beide');
+    if (dok === 'einzug') {
+      q.miete = { beginn: q.mieteNeu.beginn, ende: '', kaution: q.mieteNeu.kaution, neueAnschrift: '' };
+      q.vereinbarungen = q.vereinbarungenNeu; q.schlusstext = q.schlusstextNeu;
+      q.schluessel.forEach(x => { x.anzahl = x.anzahlNeu; });
+      q.raeume.forEach(r => r.maengel.forEach(m => { m.kosten = ''; m.wer = werBeiEinzug(m.wer); }));
+    } else { q.ergaenzungen = ''; q.fotosNeu = []; }
+  }
+  q.schluessel.forEach(x => { delete x.anzahlNeu; });
+  ['mieteNeu', 'vereinbarungenNeu', 'schlusstextNeu', 'verlauf', 'pdfZeiten', 'geaendert'].forEach(k => { delete q[k]; });
+  return q;
+}
 
 const DB = (() => {
   let verb = null;
@@ -155,7 +208,7 @@ function neueFotoIds(p, karte) {
   const t = a => a.map(i => karte.get(i)).filter(Boolean);
   p.zaehler.forEach(z => { z.fotos = t(z.fotos); });
   p.raeume.forEach(r => { r.fotos = t(r.fotos); r.maengel.forEach(m => { m.fotos = t(m.fotos); }); });
-  p.schluesselFotos = t(p.schluesselFotos);
+  p.schluesselFotos = t(p.schluesselFotos); p.fotosNeu = t(p.fotosNeu || []);
 }
 async function fotosKopieren(p) {
   const karte = new Map();
@@ -175,11 +228,10 @@ async function einlesen(datei) {
   neueFotoIds(p, karte);
   return { p, fotos };
 }
-/* Fingerabdruck von Inhalt, Fotos und Unterschriften; steht im PDF. Ändert sich etwas, ändert er sich mit. */
+/* p ist eine sicht(). Fingerabdruck von Inhalt, Fotos und Unterschriften; steht im PDF. Ändert sich etwas, ändert er sich mit. */
 async function fingerabdruck(p) {
-  const { geaendert, pdfZeit, ...rest } = p;
   const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
-  let s = JSON.stringify(rest);
+  let s = JSON.stringify(p);
   for (const id of alleFotoIds(p)) { const f = await DB.foto(id); if (f) s += hex(await crypto.subtle.digest('SHA-256', f.daten)) + (f.text || ''); }
   return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
 }
