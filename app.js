@@ -144,12 +144,40 @@ async function zeigeListe() {
     h('div', { class: 'start-akt' }, knopf('Neues Protokoll', neu, 'pri gross', 'plus'), h('label', { class: 'btn gross' }, 'Datei öffnen', imp)),
     alle.length ? h('ul', { class: 'liste' }, alle.map(p => {
       const st = istUnterschrieben(p) ? (dokumente(p).every(d => dokFertig(p, d)) ? ['Unterschrieben', 'ok'] : ['Unterschrift fehlt noch', 'warn']) : ['In Arbeit', ''];
-      return h('li', {}, h('button', { type: 'button', class: 'eintrag', onclick: () => gehe(p.id, 'verlauf') },
+      return wischbar(p, h('button', { type: 'button', class: 'eintrag', onclick: () => gehe(p.id, 'verlauf') },
         h('span', { class: 'e-haupt' }, h('b', {}, p.objekt.strasse || 'Ohne Adresse'), h('span', { class: 'leise' }, [ARTEN[p.art], p.personen.filter(x => x.rolle.startsWith('Mieter')).map(x => x.name).filter(Boolean).join(', ')].filter(Boolean).join(' · '))),
         h('span', { class: 'e-neben' }, h('span', {}, datumDe(p.termin.datum)), h('span', { class: 'pille ' + st[1] }, st[0])), icon('weiter')));
     })) : h('p', { class: 'leer' }, 'Noch kein Protokoll angelegt.'),
-    h('p', { class: 'fuss' }, 'Version 1.2.0')));
+    alle.length > 0 && h('p', { class: 'klein' }, 'Zum Löschen einen Eintrag von rechts nach links wischen.'),
+    h('p', { class: 'fuss' }, 'Version 1.3.0')));
   scrollTo(0, 0);
+}
+/* Von rechts nach links wischen legt „Löschen“ frei. Gelöscht wird erst nach einer Rückfrage. */
+function wischbar(p, eintrag) {
+  const W = 104, weg = h('button', { type: 'button', class: 'wisch-weg', tabindex: '-1', 'aria-label': `Löschen: ${p.objekt.strasse || 'Ohne Adresse'}`, onclick: () => loeschen() }, icon('weg'), 'Löschen');
+  const li = h('li', { class: 'wisch' }, weg, eintrag);
+  let x0 = 0, y0 = 0, basis = 0, lage = 0, art = '', id = null, gewischt = false;
+  const setze = (v, weich) => { lage = v; eintrag.style.transition = weich ? 'transform .18s ease-out' : 'none'; eintrag.style.transform = v ? `translateX(${v}px)` : ''; li.classList.toggle('auf', v < 0); };
+  li.zu = () => { if (lage) setze(0, true); };
+  eintrag.addEventListener('pointerdown', e => { if (e.pointerType === 'mouse' && e.button !== 0) return; x0 = e.clientX; y0 = e.clientY; basis = lage; art = ''; id = e.pointerId; gewischt = false; document.querySelectorAll('.wisch').forEach(o => { if (o !== li && o.zu) o.zu(); }); });
+  eintrag.addEventListener('pointermove', e => {
+    if (e.pointerId !== id) return;
+    const dx = e.clientX - x0, dy = e.clientY - y0;
+    if (!art) { if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; art = Math.abs(dx) > Math.abs(dy) ? 'quer' : 'hoch'; if (art === 'quer') { gewischt = true; try { eintrag.setPointerCapture(id); } catch (x) { /* ohne Belang */ } } }
+    if (art === 'quer') setze(Math.max(-W - 40, Math.min(0, basis + dx)));
+  });
+  const ende = e => { if (e.pointerId !== id) return; id = null; if (art === 'quer') setze(lage < -W * 0.4 ? -W : 0, true); };
+  eintrag.addEventListener('pointerup', ende); eintrag.addEventListener('pointercancel', ende);
+  /* Nach dem Wischen nicht versehentlich öffnen; ein Tipp auf den offenen Eintrag schließt ihn nur. */
+  li.addEventListener('click', e => { if (!eintrag.contains(e.target)) return; if (gewischt || lage) { e.stopPropagation(); e.preventDefault(); if (!gewischt) li.zu(); gewischt = false; } }, true);
+  eintrag.addEventListener('dragstart', e => e.preventDefault());
+  const loeschen = async () => {
+    const name = p.objekt.strasse || 'Ohne Adresse';
+    if (!await frage(`„${name}“ löschen?`, `${istUnterschrieben(p) ? 'Achtung: Dieses Protokoll ist schon unterschrieben. ' : ''}Alle Angaben, Fotos und Unterschriften werden von diesem Gerät gelöscht. Das lässt sich nicht rückgängig machen.`, 'Endgültig löschen', true)) { li.zu(); return; }
+    try { const f = await DB.hole(p.id); await DB.weg(p.id); if (f) await fotosWeg(alleFotoIds(pruefeProtokoll(f))); toast('Gelöscht'); } catch (e) { fehler(e, 'Das Protokoll konnte nicht gelöscht werden.'); }
+    zeigeListe();
+  };
+  return li;
 }
 async function neu() {
   const art = await dialog('Was soll protokolliert werden?', null, [{ text: 'Auszug: Wohnung zurücknehmen', wert: 'auszug', kl: 'pri' }, { text: 'Einzug: Wohnung übergeben', wert: 'einzug', kl: 'pri' }, { text: 'Beides in einem Termin', wert: 'beides', kl: 'pri' }, { text: 'Abbrechen', wert: null }], 'stapel');
@@ -245,6 +273,7 @@ const ANSICHT = {
         const t = h('input', { type: 'text', 'aria-label': 'Schritt' });
         if (await dialog('Neuer Schritt', t, [{ text: 'Abbrechen', wert: false }, { text: 'Hinzufügen', wert: true, kl: 'pri' }]) && t.value.trim()) { P.verlauf.push({ id: uid(), gruppe: 'Eigene Schritte', text: t.value.trim(), ziel: '', auto: '', erledigt: '' }); speichern(); malenHier(); }
       }, '', 'plus'),
+      !gesperrt() && h('div', { class: 'knopfzeile' }, knopf('Daten einfügen', einfuegen)),
       P.art === 'auszug' && !gesperrt() && h('div', { class: 'tipp neutral' }, h('span', {}, 'Zieht im selben Termin jemand ein? '), knopf('Übergabe ergänzen', alsBeides, 'klein-b'))
     ];
   },
@@ -273,6 +302,7 @@ const ANSICHT = {
         reihe(feld('E-Mail', x, 'email', { typ: 'email', roh: true, ...o }), feld('Telefon', x, 'tel', { typ: 'tel', ...o })), feld('Anschrift', x, 'anschrift', { gross: 'words', ...o }));
     }),
     !gesperrt(P.art === 'beides' ? 'einzug' : null) && knopf('Person hinzufügen', () => { P.personen.push(neuePerson(P.art === 'auszug' ? 'Mieter (Auszug)' : 'Mieter (Einzug)')); speichern(); malen(); letzter('.karte'); }, '', 'plus'),
+    !gesperrt() && knopf('Daten einfügen', einfuegen),
     h('p', { class: 'klein' }, P.art === 'beides' ? 'Der bisherige und der neue Mieter sehen im PDF nur ihre eigenen Angaben, nicht die des anderen.' : 'Alle Angaben hier stehen im PDF, das jeder Empfänger bekommt.')
   ],
   zaehler: () => [
@@ -368,6 +398,13 @@ function dokKarte(dok) {
     !dokFertig(P, dok) && h('div', { class: 'tipp' }, 'Es fehlen noch Unterschriften. Das PDF lässt sich trotzdem als Entwurf erstellen.'),
     ohne.length > 0 && h('div', { class: 'tipp' }, 'Ohne E-Mail-Adresse: ' + ohne.join(', ')),
     box, h('div', { class: 'knopfzeile' }, knopf('Text-Vorschau', () => vorschau(dok))));
+}
+async function einfuegen() {
+  if (gesperrt()) return hinweis('Gesperrt', 'Das Protokoll ist schon unterschrieben.');
+  const t = h('textarea', { rows: '8', 'aria-label': 'Daten', placeholder: 'Hier den kopierten Text einfügen', autocapitalize: 'none', spellcheck: 'false' });
+  if (!await dialog('Daten einfügen', [h('p', { class: 'klein' }, 'Lange ins Feld tippen und „Einsetzen“ wählen. Die Daten bleiben auf diesem Gerät.'), t], [{ text: 'Abbrechen', wert: false }, { text: 'Übernehmen', wert: true, kl: 'pri' }]) || !t.value.trim()) return;
+  const { n, unklar } = datenEinfuegen(P, t.value); await speichern(true); malenHier();
+  if (unklar.length) hinweis(`${n} Angaben übernommen`, `Nicht erkannt: ${unklar.slice(0, 4).join(' · ')}`); else toast(`${n} Angaben übernommen`);
 }
 async function alsBeides() {
   if (!await frage('Übergabe ergänzen?', 'Aus diesem Auszug wird ein gemeinsamer Termin mit Abnahme und Übergabe. Deine Eingaben bleiben erhalten.', 'Ergänzen')) return;
@@ -554,5 +591,10 @@ function weg() {
   const m = /^#\/([^/]+)\/(\w+)/.exec(location.hash); if (m) zeigeProtokoll(m[1], m[2]); else zeigeListe();
 }
 window.addEventListener('hashchange', weg);
-weg();
-if ('serviceWorker' in navigator && isSecureContext) navigator.serviceWorker.register('sw.js').catch(e => console.warn(e));
+vorbereiten().then(weg);
+if ('serviceWorker' in navigator && isSecureContext) {
+  const hatte = !!navigator.serviceWorker.controller; let neuGeladen = false;
+  navigator.serviceWorker.register('sw.js').then(r => { document.addEventListener('visibilitychange', () => { if (!document.hidden) r.update().catch(() => {}); }); }).catch(e => console.warn(e));
+  /* Neue Version: in der Übersicht sofort laden, beim Ausfüllen nicht stören. */
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (!hatte || neuGeladen) return; if (!P && !document.querySelector('.huelle')) { neuGeladen = true; location.reload(); } else toast('Neue Version beim nächsten Start'); });
+}
